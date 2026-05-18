@@ -101,7 +101,7 @@ with st.sidebar:
             "shield-fill-exclamation"
         ],
         menu_icon="cast",
-        default_index=0,
+        default_index=1,
         styles={
             "container": {"padding": "0!important", "background-color": "transparent"},
             "icon": {"color": "#F8FAFC", "font-size": "18px"}, 
