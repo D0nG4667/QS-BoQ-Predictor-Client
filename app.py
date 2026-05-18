@@ -310,11 +310,27 @@ def render_boq_predictor():
 
                 # NRM Hierarchy breakdown
                 st.markdown("**Predicted NRM Hierarchy**")
-                h1c, h2c, h3c, h4c = st.columns(4)
-                h1c.metric("GE Code",      pred.get("predicted_ge", "—"))
-                h2c.metric("Group Element", pred.get("predicted_group_element", "—"))
-                h3c.metric("Element Code", pred.get("predicted_e", "—"))
-                h4c.metric("Element",      pred.get("predicted_element", "—"))
+                
+                ge_code = pred.get("predicted_ge", "—")
+                group_el = pred.get("predicted_group_element", "—")
+                e_code = pred.get("predicted_e", "—")
+                element = pred.get("predicted_element", "—")
+                
+                st.markdown(f"""
+                <div class="nrm-flow-container">
+                    <div class="nrm-badge-ge">
+                        <span class="nrm-label-ge">GE {ge_code}</span>
+                        <strong class="nrm-text">{group_el}</strong>
+                    </div>
+                    <span class="nrm-arrow">&rarr;</span>
+                    <div class="nrm-badge-e">
+                        <span class="nrm-label-e">E {e_code}</span>
+                        <strong class="nrm-text">{element}</strong>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+
 
                 # Meta info
                 with st.expander("📋  Full Prediction Payload & Metadata"):
@@ -328,12 +344,355 @@ def render_boq_predictor():
                 st.info("Make sure the FastAPI server is running and `API_BASE_URL` in your `.env` is correct.")
 
 def render_boq_ingestion():
-    st.title("BoQ Ingestion & Smart Mapping")
-    st.markdown("Upload raw contractor BoQs and map them to the platform schema.")
-    uploaded_file = st.file_uploader("Upload BoQ (Excel/CSV)", type=["xlsx", "csv"])
-    if uploaded_file:
-        if st.button("Run AI Engine"):
-            st.success("File securely transmitted to FastAPI Backend for XGBoost Inference.")
+    """
+    Production-grade BoQ batch ingestion page.
+
+    Pipeline:
+        1. Upload  → parse Excel/CSV into a DataFrame.
+        2. Map     → auto-detect schema columns; let the QS correct mismatches.
+        3. Preview → show the first N rows before committing to the API.
+        4. Infer   → POST batch to /api/v1/predict, poll with a progress bar.
+        5. Results → enrich the original DataFrame with predictions; render
+                     the governance AgGrid and offer a CSV/Excel download.
+    """
+
+    # ── Schema vocabulary ────────────────────────────────────────────────────
+    SCHEMA_COLS: list[str] = [
+        "ge", "group_element", "e", "element",
+        "description", "item", "notes",
+        "qty", "rate_base_date", "rate_q1_2025",
+        "uom", "project", "typology", "location",
+        "base_date", "package", "rate_scope", "client_location",
+        "basket_of_goods",
+    ]
+
+    REQUIRED_COLS: set[str] = {"description"}
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    st.title("📂 BoQ Ingestion & Batch Inference")
+    st.markdown(
+        "Upload a raw Bill of Quantities (Excel or CSV), "
+        "map its columns to the AI schema, and run **batch XGBoost inference** "
+        "across the entire file in a single request."
+    )
+
+    # ── Step 1: File Upload ──────────────────────────────────────────────────
+    st.markdown("### Step 1 — Upload File")
+    uploaded_file = st.file_uploader(
+        "Drop your BoQ file here",
+        type=["xlsx", "xls", "csv"],
+        help="Excel (.xlsx / .xls) or CSV. First row must be the header.",
+    )
+
+    if not uploaded_file:
+        # Collapsed Premium Insight Expander
+        with st.expander("💡 Architectural Insight — Excel (.xlsx) vs. CSV (Why Excel is preferred)", expanded=False):
+            st.write(
+                "For the most robust AI classifications and rate analytics, uploading native **Excel (.xlsx)** "
+                "files is highly recommended over CSV:"
+            )
+            st.markdown(
+                "- **Bypasses Truncation Errors:** Visual overflows like `###` in Excel are fully preserved "
+                "as actual numeric floats in underlying XML. The AI reads them flawlessly.\n"
+                "- **CSV Flattening Risk:** Exporting to CSV while columns are visually narrow permanently "
+                "flattens numbers into literal text strings (`\"########\"`), leading to complete loss of price precision."
+            )
+
+
+
+        st.info("⬆️  Upload an Excel or CSV file to begin. The AI engine will handle schema mapping automatically.")
+        
+        return
+
+    # Contextual CSV Alert
+    if uploaded_file.name.endswith(".csv"):
+        st.warning(
+            "⚠️ **CSV Upload Detected:** "
+            "Please ensure this CSV wasn't exported while Excel columns were narrow. "
+            "If visual `###` truncations were present during export, they are now literal text strings in this file. "
+            "Upload the original `.xlsx` for maximum accuracy."
+        )
+
+
+    # ── Parse file ───────────────────────────────────────────────────────────
+    @st.cache_data(show_spinner=False)
+    def _parse_file(name: str, data: bytes) -> pd.DataFrame:
+        import io
+        if name.endswith(".csv"):
+            return pd.read_csv(io.BytesIO(data))
+        return pd.read_excel(io.BytesIO(data))
+
+    with st.spinner("Parsing file…"):
+        try:
+            raw_df = _parse_file(uploaded_file.name, uploaded_file.getvalue())
+        except Exception as exc:
+            st.error(f"❌ Could not parse file: `{exc}`")
+            return
+
+    total_rows = len(raw_df)
+    st.success(f"✅ Loaded **{total_rows:,} rows** × **{len(raw_df.columns)} columns** from `{uploaded_file.name}`")
+
+    # ── Step 2: Column Mapping ───────────────────────────────────────────────
+    st.markdown("### Step 2 — Column Mapping")
+    st.markdown(
+        "The engine will auto-detect obvious matches. "
+        "Fix anything that looks wrong before running inference."
+    )
+
+    # Auto-detect: lowercase + strip the file's column names and match greedily
+    file_cols: list[str] = list(raw_df.columns)
+    file_col_norm: dict[str, str] = {
+        c.lower().strip().replace(" ", "_").replace("-", "_"): c
+        for c in file_cols
+    }
+
+    # Alias map: file column names (normalised) that should map to a schema column.
+    # Add entries here whenever a new source system uses non-standard names.
+    ALIASES: dict[str, str] = {
+        # uom
+        "unit":              "uom",
+        "units":             "uom",
+        "uom_code":          "uom",
+        "unit_of_measure":   "uom",
+        "unit_of_measurement": "uom",
+        "measure":           "uom",
+        # qty
+        "quantity":          "qty",
+        "quantity_nr":       "qty",
+        "amount":            "qty",
+        # description
+        "desc":              "description",
+        "item_description":  "description",
+        "work_description":  "description",
+        # rate fields
+        "rate":              "rate_base_date",
+        "base_rate":         "rate_base_date",
+        "current_rate":      "rate_q1_2025",
+        # project / context
+        "project_name":      "project",
+        "job":               "project",
+        "area":              "location",
+        "region":            "location",
+        "sub_element":       "element",
+        "nrm_element":       "element",
+        "nrm_group":         "group_element",
+    }
+
+    def _auto_detect(schema_col: str) -> str:
+        """Return the best file column match for a schema column, or '' if none."""
+        # 1. Exact normalised match
+        if schema_col in file_col_norm:
+            return file_col_norm[schema_col]
+        # 2. Alias map: check if any file column's normalised name is a known alias
+        for norm, orig in file_col_norm.items():
+            if ALIASES.get(norm) == schema_col:
+                return orig
+        # 3. Partial substring match — only for tokens long enough to be unambiguous.
+        #    Single-char schema cols like "e" must NOT greedily match "item", "notes", etc.
+        #    Direction is intentionally one-way: the schema column name must appear INSIDE
+        #    the file column name (e.g. "description" inside "item_description"). The reverse
+        #    is NOT checked — that would let a short file column like "rate" match the longer
+        #    schema column "rate_scope", which is almost never the correct mapping.
+        if len(schema_col) >= 3:
+            for norm, orig in file_col_norm.items():
+                if schema_col in norm:
+                    return orig
+        return ""
+
+    NONE_OPT = "— not mapped —"
+    col_opts  = [NONE_OPT] + file_cols
+
+    # Show mapping UI in a tight 3-column grid
+    mapping: dict[str, str | None] = {}
+    cols_per_row = 3
+    schema_chunks = [SCHEMA_COLS[i:i+cols_per_row] for i in range(0, len(SCHEMA_COLS), cols_per_row)]
+
+    with st.expander("🗺️  Column mapping (expand to review / edit)", expanded=True):
+        for chunk in schema_chunks:
+            grid_cols = st.columns(cols_per_row)
+            for col_widget, schema_col in zip(grid_cols, chunk):
+                default = _auto_detect(schema_col)
+                idx = col_opts.index(default) if default in col_opts else 0
+                selected = col_widget.selectbox(
+                    f"`{schema_col}`" + (" \\*" if schema_col in REQUIRED_COLS else ""),
+                    options=col_opts,
+                    index=idx,
+                    key=f"map_{schema_col}",
+                )
+                mapping[schema_col] = None if selected == NONE_OPT else selected
+
+    # Validate required columns are mapped
+    missing_required = [c for c in REQUIRED_COLS if not mapping.get(c)]
+    if missing_required:
+        st.error(f"⚠️  Required column(s) not mapped: **{', '.join(missing_required)}**. Please fix the mapping above.")
+        return
+
+    # ── Step 3: Preview ──────────────────────────────────────────────────────
+    st.markdown("### Step 3 — Data Preview")
+    preview_n = st.slider("Rows to preview", min_value=5, max_value=min(50, total_rows), value=10, step=5)
+
+    # Build a human-readable preview using mapped names
+    preview_cols = {v: k for k, v in mapping.items() if v}
+    preview_df = raw_df.head(preview_n)[list(preview_cols.keys())].rename(columns=preview_cols)
+    st.dataframe(preview_df, use_container_width=True)
+
+    # ── Step 4: Run Inference ────────────────────────────────────────────────
+    st.markdown("### Step 4 — Run Batch Inference")
+
+    col_run, col_info = st.columns([1, 3])
+    with col_info:
+        st.markdown(
+            f"<span style='color:#64748B;font-size:13px;'>"
+            f"Will send **{total_rows:,} items** to the XGBoost engine via "
+            f"`POST /api/v1/predict`.</span>",
+            unsafe_allow_html=True,
+        )
+    run_clicked = col_run.button("🚀  Run AI Engine", type="primary", use_container_width=True)
+
+    if not run_clicked and "ingestion_result" not in st.session_state:
+        return
+
+    # Build items payload from the mapped DataFrame
+    def _build_items(df: pd.DataFrame, col_map: dict[str, str | None]) -> list[dict]:
+        """
+        Convert the raw DataFrame into a list of schema-conformant dicts.
+        NaN / NaT values are coerced to None so JSON serialisation is clean.
+        """
+        items: list[dict] = []
+        for _, row in df.iterrows():
+            item: dict = {}
+            for schema_col, file_col in col_map.items():
+                if file_col is None:
+                    item[schema_col] = None
+                    continue
+                val = row.get(file_col)
+                # Coerce pandas NA types to None
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    item[schema_col] = None
+                elif hasattr(val, "item"):          # numpy scalar → python primitive
+                    item[schema_col] = val.item()
+                else:
+                    item[schema_col] = val
+            items.append(item)
+        return items
+
+    if run_clicked:
+        api = BoQIntelligenceAPI()
+        items_payload = _build_items(raw_df, mapping)
+
+        progress_bar = st.progress(0, text="Sending batch to inference engine…")
+        try:
+            result = api.predict_batch(
+                items=items_payload,
+                access_token=user_context["access_token"],
+                timeout=180,
+            )
+            progress_bar.progress(100, text="Inference complete ✅")
+            st.session_state["ingestion_result"]  = result
+            st.session_state["ingestion_raw_df"]  = raw_df.copy()
+            st.session_state["ingestion_filename"] = uploaded_file.name
+        except Exception as exc:
+            progress_bar.empty()
+            st.error(f"❌ Inference failed: `{exc}`")
+            st.info("Make sure the FastAPI server is running and `API_BASE_URL` in `.env` is correct.")
+            return
+
+    # ── Step 5: Results ──────────────────────────────────────────────────────
+    if "ingestion_result" not in st.session_state:
+        return
+
+    result     = st.session_state["ingestion_result"]
+    source_df  = st.session_state["ingestion_raw_df"]
+    predictions: list[dict] = result.get("predictions", [])
+
+    if not predictions:
+        st.warning("The API returned an empty predictions list.")
+        return
+
+    st.markdown("---")
+    st.markdown("### Step 5 — Results")
+
+    # ── KPI strip ────────────────────────────────────────────────────────────
+    pred_df = pd.DataFrame(predictions)
+
+    total          = len(pred_df)
+    high_conf      = (pred_df["confidence"] >= 0.85).sum()
+    low_conf       = (pred_df["confidence"] < 0.6).sum()
+    unclassified   = (pred_df["predicted_category"] == "Others").sum()
+    ml_pct         = (pred_df["prediction_source"] == "ML_Model").mean() * 100
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total Items",        f"{total:,}")
+    k2.metric("High Confidence ≥85%", f"{high_conf:,}", f"{high_conf/total*100:.1f}%")
+    k3.metric("Low Confidence <60%",  f"{low_conf:,}",  delta_color="inverse" if low_conf else "normal")
+    k4.metric("Unclassified",         f"{unclassified:,}", delta_color="inverse" if unclassified else "normal")
+    k5.metric("ML Engine Share",      f"{ml_pct:.1f}%")
+
+    st.markdown("---")
+
+    # ── Enrich original DataFrame with predictions ────────────────────────────
+    result_df = source_df.copy().reset_index(drop=True)
+    result_df["Predicted_Category"]    = pred_df["predicted_category"]
+    result_df["Confidence"]            = pred_df["confidence"].round(4)
+    result_df["Prediction_Source"]     = pred_df["prediction_source"]
+    result_df["Predicted_GE"]          = pred_df["predicted_ge"]
+    result_df["Predicted_Group_Element"] = pred_df["predicted_group_element"]
+    result_df["Predicted_E"]           = pred_df["predicted_e"]
+    result_df["Predicted_Element"]     = pred_df["predicted_element"]
+
+    # Move prediction columns to front for readability
+    pred_cols   = ["Predicted_Category", "Confidence", "Prediction_Source",
+                   "Predicted_GE", "Predicted_Group_Element", "Predicted_E", "Predicted_Element"]
+    other_cols  = [c for c in result_df.columns if c not in pred_cols]
+    result_df   = result_df[pred_cols + other_cols]
+
+    # Persist result_df for NRM Governance page
+    st.session_state["df_boq_results"] = result_df
+
+    # Render the governance grid
+    st.subheader("AI Classification Results")
+    st.markdown("**Green** = ML High Confidence · **Blue** = Rule Engine · **Red** = Low Confidence / Unclassified")
+    render_boq_governance_grid(result_df)
+
+    # ── Download ─────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📥 Export Results")
+
+    def _to_csv_bytes(df: pd.DataFrame) -> bytes:
+        return df.to_csv(index=False).encode("utf-8-sig")
+
+    def _to_excel_bytes(df: pd.DataFrame) -> bytes:
+        import io
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="BoQ Predictions")
+        return buf.getvalue()
+
+    dl1, dl2, _ = st.columns([1, 1, 4])
+    stem = Path(st.session_state["ingestion_filename"]).stem
+    dl1.download_button(
+        label="⬇️  Download CSV",
+        data=_to_csv_bytes(result_df),
+        file_name=f"{stem}_predictions.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    dl2.download_button(
+        label="⬇️  Download Excel",
+        data=_to_excel_bytes(result_df),
+        file_name=f"{stem}_predictions.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    # Model metadata footer
+    with st.expander("🔬 Model metadata"):
+        st.json({
+            "model_version": result.get("model_version"),
+            "model_name":    result.get("model_name"),
+            "items_processed": total,
+        })
+
 
 def render_nrm_governance():
     st.title("NRM Classification Governance")

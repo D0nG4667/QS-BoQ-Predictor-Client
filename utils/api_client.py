@@ -38,27 +38,49 @@ class BoQIntelligenceAPI:
             headers["Authorization"] = f"Bearer {access_token}"
         return headers
 
-    def post_json(self, endpoint: str, payload: Dict[str, Any], access_token: str) -> Dict[str, Any]:
-        """Send JSON data to the backend (e.g., updating a QS classification override)."""
+    def post_json(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        access_token: str,
+        timeout: int = 30,
+    ) -> Dict[str, Any]:
+        """Send JSON data to the backend."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         try:
-            response = self.session.post(url, json=payload, headers=self._get_headers(access_token))
+            response = self.session.post(
+                url,
+                json=payload,
+                headers=self._get_headers(access_token),
+                timeout=timeout,
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"API POST Error at {endpoint}: {str(e)}")
             raise e
 
-    def upload_boq(self, endpoint: str, file_bytes: bytes, filename: str, access_token: str) -> Dict[str, Any]:
-        """Upload a raw BoQ Excel/CSV file to the backend for ML Processing."""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        files = {"file": (filename, file_bytes)}
-        try:
-            # Note: Do not explicitly set Content-Type header when uploading files via requests; 
-            # requests sets the multi-part boundary automatically.
-            response = self.session.post(url, files=files, headers=self._get_headers(access_token))
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"BoQ Upload Error: {str(e)}")
-            raise e
+
+    def predict_batch(
+        self,
+        items: list[dict],
+        access_token: str,
+        timeout: int = 120,
+    ) -> dict:
+        """
+        Send a batch of BoQ item dicts to the inference engine.
+
+        Args:
+            items:        List of raw BoQ item dicts (any schema — the API normalises them).
+            access_token: PropelAuth Bearer token.
+            timeout:      Request timeout in seconds (default 120 for large batches).
+
+        Returns:
+            Parsed JSON response dict from the API.
+        """
+        return self.post_json(
+            "/api/v1/predict",
+            payload={"items": items},
+            access_token=access_token,
+            timeout=timeout,
+        )

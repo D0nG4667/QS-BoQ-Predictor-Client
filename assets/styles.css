@@ -24,11 +24,24 @@ footer {visibility: hidden;}
     color: #FFFFFF;
 }
 
-/* Metric Cards Styling */
+/* Metric Number Results - Clean, High-Contrast & Theme-Aware */
 [data-testid="stMetricValue"] {
-    color: #0B192C;
-    font-weight: 700;
+    color: #1D4ED8 !important; /* Elegant High-Contrast Royal Blue (Light Mode) */
+    font-weight: 700 !important;
 }
+
+/* System Dark Mode Fallback */
+@media (prefers-color-scheme: dark) {
+    [data-testid="stMetricValue"] {
+        color: #38BDF8 !important; /* Luminous High-Contrast Sky Blue (Dark Mode) */
+    }
+}
+
+/* Streamlit Theme Specific Fallback */
+.stApp[data-theme="dark"] [data-testid="stMetricValue"] {
+    color: #38BDF8 !important;
+}
+
 
 /* Button Styling */
 .stButton>button {
@@ -52,3 +65,93 @@ footer {visibility: hidden;}
     border-radius: 8px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.05);
 }
+
+/* NRM Hierarchy Flow Breadcrumb Component */
+.nrm-flow-container {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    background-color: var(--background-color, #FFFFFF);
+    border: 1px solid rgba(128, 128, 128, 0.15);
+    padding: 16px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.nrm-badge-ge {
+    display: flex;
+    align-items: center;
+    background-color: rgba(29, 78, 216, 0.06);
+    border: 1px solid rgba(29, 78, 216, 0.18);
+    padding: 6px 14px;
+    border-radius: 6px;
+    gap: 10px;
+}
+
+.nrm-label-ge {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #1D4ED8;
+    background-color: rgba(29, 78, 216, 0.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+
+.nrm-badge-e {
+    display: flex;
+    align-items: center;
+    background-color: rgba(16, 185, 129, 0.06);
+    border: 1px solid rgba(16, 185, 129, 0.18);
+    padding: 6px 14px;
+    border-radius: 6px;
+    gap: 10px;
+}
+
+.nrm-label-e {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #10B981;
+    background-color: rgba(16, 185, 129, 0.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+
+.nrm-text {
+    color: var(--text-color, #0F172A);
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+.nrm-arrow {
+    color: #64748B;
+    font-size: 18px;
+    font-weight: bold;
+    margin: 0 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .nrm-badge-ge {
+        background-color: rgba(56, 189, 248, 0.06);
+        border: 1px solid rgba(56, 189, 248, 0.18);
+    }
+    .nrm-label-ge {
+        color: #38BDF8;
+        background-color: rgba(56, 189, 248, 0.1);
+    }
+    .nrm-badge-e {
+        background-color: rgba(52, 211, 153, 0.06);
+        border: 1px solid rgba(52, 211, 153, 0.18);
+    }
+    .nrm-label-e {
+        color: #34D399;
+        background-color: rgba(52, 211, 153, 0.1);
+    }
+}
+
